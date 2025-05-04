@@ -1,38 +1,37 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
-#include "filters.h"
 #include "utils.h"
+#include "filters.h"
 
 int main() {
-    // Load original and degraded image (grayscale)
-    cv::Mat degraded = cv::imread("images/degraded.png", cv::IMREAD_GRAYSCALE);
-    cv::Mat original = cv::imread("images/original.png", cv::IMREAD_GRAYSCALE);
-
-    if (degraded.empty() || original.empty()) {
-        std::cerr << "Error: Could not load images.\n";
+    // Load input grayscale image
+    cv::Mat original = cv::imread("input.jpg", cv::IMREAD_GRAYSCALE);
+    if (original.empty()) {
+        std::cerr << "Error: Could not load input image.\n";
         return -1;
     }
 
-    // Create horizontal motion blur kernel (e.g., length 15)
-    int blurLength = 15;
-    cv::Mat psf = createMotionBlurKernel(blurLength, degraded.size());
+    // Step 1: Create Gaussian PSF (blur kernel)
+    cv::Size psfSize(21, 21);     // Size of the blur kernel
+    double sigma = 5.0;           // Standard deviation for Gaussian blur
+    cv::Mat psf = createGaussianPSF(psfSize, sigma);
 
-    // Apply inverse filtering
-    cv::Mat restored_inv = inverseFilter(degraded, psf);
-    cv::imwrite("results/restored_inverse.png", restored_inv);
+    // Step 2: Degrade image (blur + noise)
+    double noiseStdDev = 10.0;    // Standard deviation of Gaussian noise
+    cv::Mat degraded = degradeImage(original, psf, noiseStdDev);
 
-    // Apply Wiener filtering
-    double K = 0.01; // noise-to-signal power ratio (assumed)
-    cv::Mat restored_wiener = wienerFilter(degraded, psf, K);
-    cv::imwrite("results/restored_wiener.png", restored_wiener);
+    // Step 3: Apply inverse filter
+    cv::Mat restoredInverse = inverseFilter(degraded, psf);
 
-    // Compute and print PSNR
-    double psnr_inv = calculatePSNR(original, restored_inv);
-    double psnr_wiener = calculatePSNR(original, restored_wiener);
+    // Step 4: Apply Wiener filter
+    double snr = 0.01;            // Lower value = more noise assumed
+    cv::Mat restoredWiener = wienerFilter(degraded, psf, snr);
 
-    std::cout << "PSNR (Inverse Filter): " << psnr_inv << " dB\n";
-    std::cout << "PSNR (Wiener Filter): " << psnr_wiener << " dB\n";
+    // Step 5: Display and save results
+    showAndSave("Original Image", original, "original.png");
+    showAndSave("Degraded Image", degraded, "degraded.png");
+    showAndSave("Restored (Inverse Filter)", restoredInverse, "restored_inverse.png");
+    showAndSave("Restored (Wiener Filter)", restoredWiener, "restored_wiener.png");
 
     return 0;
 }
-
