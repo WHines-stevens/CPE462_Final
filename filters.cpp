@@ -204,7 +204,7 @@ cv::Mat wienerFilter(const cv::Mat& degraded, const cv::Mat& psf, double K) {
     computeDFT(degradedF, G);
     computeDFT(psfF, H);
     
-    // For Wiener filter: F = H* / (|H|² + K) * G where K is frequency-dependent
+    // Implementation of Wiener filter: F = (H* / (|H|² + K)) * G where K is frequency-dependent
     cv::Mat planes_G[2], planes_H[2], planes_F[2];
     cv::split(G, planes_G);
     cv::split(H, planes_H);
@@ -232,8 +232,8 @@ cv::Mat wienerFilter(const cv::Mat& degraded, const cv::Mat& psf, double K) {
             float distance = std::sqrt(dx*dx + dy*dy) / std::sqrt((H.cols/2)*(H.cols/2) + (H.rows/2)*(H.rows/2));
             
             // Make K frequency-dependent: higher K for higher frequencies to suppress noise
-            // This is critical for the "Lena" image which has a lot of high-frequency noise
-            float adaptiveK = K * (1.0f + 10.0f * distance * distance);
+            // Use a gentler curve to preserve more mid-frequency details
+            float adaptiveK = K * (1.0f + 5.0f * distance * distance);
             
             // Apply threshold to avoid division by very small values
             float denom = std::max(mag_H_squared, 0.0001f) + adaptiveK;
@@ -241,14 +241,18 @@ cv::Mat wienerFilter(const cv::Mat& degraded, const cv::Mat& psf, double K) {
             float re_G = planes_G[0].at<float>(y, x);
             float im_G = planes_G[1].at<float>(y, x);
             
-            // H* is the complex conjugate (re_H, -im_H)
-            // Wiener filter: H* * G / (|H|² + K)
-            planes_F[0].at<float>(y, x) = (re_H * re_G - im_H * (-im_G)) / denom;
-            planes_F[1].at<float>(y, x) = (re_H * (-im_G) + im_H * re_G) / denom;
+            // H* is the complex conjugate of H (re_H, -im_H)
+            // Complex multiplication of H* and G
+            float re_HG = re_H * re_G + im_H * im_G;  // Fixed complex multiplication
+            float im_HG = im_H * re_G - re_H * im_G;  // Fixed sign here
             
-            // Apply additional high-frequency dampening for very high frequencies
-            if (distance > 0.7) {
-                float dampening = std::max(0.0f, 1.0f - (distance - 0.7f) / 0.3f);
+            // Division by denominator
+            planes_F[0].at<float>(y, x) = re_HG / denom;
+            planes_F[1].at<float>(y, x) = im_HG / denom;
+            
+            // Apply gentler high-frequency dampening only for very high frequencies
+            if (distance > 0.8) {
+                float dampening = std::max(0.0f, 1.0f - (distance - 0.8f) / 0.2f);
                 planes_F[0].at<float>(y, x) *= dampening;
                 planes_F[1].at<float>(y, x) *= dampening;
             }
@@ -259,13 +263,19 @@ cv::Mat wienerFilter(const cv::Mat& degraded, const cv::Mat& psf, double K) {
     cv::merge(planes_F, 2, F);
     cv::Mat restored = computeIDFT(F);
     
-    // Apply additional post-processing to enhance details
+    // Apply gentle post-processing to enhance details while controlling noise
     cv::Mat enhanced;
     cv::normalize(restored, enhanced, 0, 255, cv::NORM_MINMAX);
     
-    // Optional: Apply mild contrast enhancement
-    cv::equalizeHist(enhanced, enhanced);
+    // Apply mild contrast enhancement instead of histogram equalization
+    double alpha = 1.2; // Contrast control (1.0-3.0)
+    int beta = 5;       // Brightness control (0-100)
+    enhanced.convertTo(enhanced, CV_8U, alpha, beta);
+    
+    // Apply a mild denoising filter
+    cv::Mat denoised;
+    cv::fastNlMeansDenoising(enhanced, denoised, 3, 7, 21);
     
     // Crop to original size
-    return enhanced(cv::Rect(0, 0, degradedGray.cols, degradedGray.rows));
+    return denoised(cv::Rect(0, 0, degradedGray.cols, degradedGray.rows));
 }
