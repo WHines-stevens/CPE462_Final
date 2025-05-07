@@ -196,86 +196,120 @@ cv::Mat wienerFilter(const cv::Mat& degraded, const cv::Mat& psf, double K) {
     
     // Prepare images for DFT
     cv::Mat degradedF = padAndConvert(degradedGray, dftSize);
-    cv::Mat psfCentered = centerPSF(psf, dftSize);
-    cv::Mat psfF = padAndConvert(psfCentered, dftSize);
+    cv::Mat psfF = padAndConvert(psf, dftSize);
     
-    // Compute DFTs
-    cv::Mat G, H;
-    computeDFT(degradedF, G);
-    computeDFT(psfF, H);
+    // Center the PSF manually to avoid potential issues
+    cv::Point2d center(psfF.cols/2, psfF.rows/2);
+    double sum = cv::sum(psfF)[0];
+    psfF /= sum;  // Normalize
     
-    // Implementation of Wiener filter: F = (H* / (|H|² + K)) * G where K is frequency-dependent
-    cv::Mat planes_G[2], planes_H[2], planes_F[2];
-    cv::split(G, planes_G);
-    cv::split(H, planes_H);
+    cv::Mat tmp = psfF.clone();
+    int cx = psfF.cols / 2;
+    int cy = psfF.rows / 2;
     
-    // Create result matrices
-    planes_F[0] = cv::Mat::zeros(H.rows, H.cols, CV_32F);
-    planes_F[1] = cv::Mat::zeros(H.rows, H.cols, CV_32F);
+    cv::Mat q0(tmp, cv::Rect(0, 0, cx, cy));
+    cv::Mat q1(tmp, cv::Rect(cx, 0, cx, cy));
+    cv::Mat q2(tmp, cv::Rect(0, cy, cx, cy));
+    cv::Mat q3(tmp, cv::Rect(cx, cy, cx, cy));
     
-    // Calculate maximum magnitude of H for adaptive K
-    cv::Mat H_mag;
-    cv::magnitude(planes_H[0], planes_H[1], H_mag);
-    double maxH;
-    cv::minMaxLoc(H_mag, nullptr, &maxH);
+    cv::Mat d0(psfF, cv::Rect(cx, cy, cx, cy));
+    cv::Mat d1(psfF, cv::Rect(0, cy, cx, cy));
+    cv::Mat d2(psfF, cv::Rect(cx, 0, cx, cy));
+    cv::Mat d3(psfF, cv::Rect(0, 0, cx, cy));
     
-    // Apply improved Wiener filter with frequency-dependent K
-    for (int y = 0; y < H.rows; y++) {
-        for (int x = 0; x < H.cols; x++) {
-            float re_H = planes_H[0].at<float>(y, x);
-            float im_H = planes_H[1].at<float>(y, x);
-            float mag_H_squared = re_H * re_H + im_H * im_H;
+    q0.copyTo(d0);
+    q1.copyTo(d1);
+    q2.copyTo(d2);
+    q3.copyTo(d3);
+    
+    // Create the complex matrices directly
+    cv::Mat degradedComplex, psfComplex;
+    
+    // Convert to complex format
+    cv::Mat planes1[] = {degradedF, cv::Mat::zeros(degradedF.size(), CV_32F)};
+    cv::Mat planes2[] = {psfF, cv::Mat::zeros(psfF.size(), CV_32F)};
+    
+    cv::merge(planes1, 2, degradedComplex);
+    cv::merge(planes2, 2, psfComplex);
+    
+    // Perform DFT
+    cv::dft(degradedComplex, degradedComplex);
+    cv::dft(psfComplex, psfComplex);
+    
+    // Split into real and imaginary parts
+    cv::Mat planesG[2], planesH[2];
+    cv::split(degradedComplex, planesG);
+    cv::split(psfComplex, planesH);
+    
+    // Create output complex array
+    cv::Mat planesOut[2];
+    planesOut[0] = cv::Mat::zeros(planesG[0].size(), CV_32F);
+    planesOut[1] = cv::Mat::zeros(planesG[1].size(), CV_32F);
+    
+    // Apply Wiener filter: H* / (|H|² + K) * G
+    for (int i = 0; i < planesH[0].rows; i++) {
+        for (int j = 0; j < planesH[0].cols; j++) {
+            // Get values from matrices
+            float Gr = planesG[0].at<float>(i, j);
+            float Gi = planesG[1].at<float>(i, j);
+            float Hr = planesH[0].at<float>(i, j);
+            float Hi = planesH[1].at<float>(i, j);
             
-            // Calculate distance from center (frequency measure)
-            float dx = x - H.cols/2;
-            float dy = y - H.rows/2;
-            float distance = std::sqrt(dx*dx + dy*dy) / std::sqrt((H.cols/2)*(H.cols/2) + (H.rows/2)*(H.rows/2));
+            // Calculate |H|²
+            float H_sqr_mag = Hr*Hr + Hi*Hi;
             
-            // Make K frequency-dependent: higher K for higher frequencies to suppress noise
-            // Use a gentler curve to preserve more mid-frequency details
-            float adaptiveK = K * (1.0f + 5.0f * distance * distance);
+            // Distance from center for frequency-dependent K
+            float row_freq = (float)i - planesH[0].rows/2.0f;
+            float col_freq = (float)j - planesH[0].cols/2.0f;
+            float dist = sqrt(row_freq*row_freq + col_freq*col_freq);
+            float normalized_dist = dist / sqrt(planesH[0].rows*planesH[0].rows/4.0f + planesH[0].cols*planesH[0].cols/4.0f);
             
-            // Apply threshold to avoid division by very small values
-            float denom = std::max(mag_H_squared, 0.0001f) + adaptiveK;
+            // Lower K for low frequencies, higher for high frequencies
+            float k_adjusted = K * (0.1f + 2.0f * normalized_dist);
             
-            float re_G = planes_G[0].at<float>(y, x);
-            float im_G = planes_G[1].at<float>(y, x);
+            // Denominator with adjusted K
+            float denom = H_sqr_mag + k_adjusted;
             
-            // H* is the complex conjugate of H (re_H, -im_H)
-            // Complex multiplication of H* and G
-            float re_HG = re_H * re_G + im_H * im_G;  // Fixed complex multiplication
-            float im_HG = im_H * re_G - re_H * im_G;  // Fixed sign here
+            // Avoid division by very small values
+            if (denom < 0.0001f) denom = 0.0001f;
             
-            // Division by denominator
-            planes_F[0].at<float>(y, x) = re_HG / denom;
-            planes_F[1].at<float>(y, x) = im_HG / denom;
+            // Complex division (H* * G) / (|H|² + K)
+            // H* is the complex conjugate of H (Hr, -Hi)
+            planesOut[0].at<float>(i, j) = (Hr*Gr + Hi*Gi) / denom;
+            planesOut[1].at<float>(i, j) = (Hr*Gi - Hi*Gr) / denom;
             
-            // Apply gentler high-frequency dampening only for very high frequencies
-            if (distance > 0.8) {
-                float dampening = std::max(0.0f, 1.0f - (distance - 0.8f) / 0.2f);
-                planes_F[0].at<float>(y, x) *= dampening;
-                planes_F[1].at<float>(y, x) *= dampening;
+            // Additional high-frequency suppression
+            if (normalized_dist > 0.7f) {
+                float suppression = std::max(0.0f, 1.0f - (normalized_dist - 0.7f) / 0.3f);
+                planesOut[0].at<float>(i, j) *= suppression;
+                planesOut[1].at<float>(i, j) *= suppression;
             }
         }
     }
     
-    cv::Mat F;
-    cv::merge(planes_F, 2, F);
-    cv::Mat restored = computeIDFT(F);
+    // Merge real and imaginary parts
+    cv::Mat complexOutput;
+    cv::merge(planesOut, 2, complexOutput);
     
-    // Apply gentle post-processing to enhance details while controlling noise
-    cv::Mat enhanced;
-    cv::normalize(restored, enhanced, 0, 255, cv::NORM_MINMAX);
-    
-    // Apply mild contrast enhancement instead of histogram equalization
-    double alpha = 1.2; // Contrast control (1.0-3.0)
-    int beta = 5;       // Brightness control (0-100)
-    enhanced.convertTo(enhanced, CV_8U, alpha, beta);
-    
-    // Apply a mild denoising filter
-    cv::Mat denoised;
-    cv::fastNlMeansDenoising(enhanced, denoised, 3, 7, 21);
+    // Inverse DFT
+    cv::Mat outputImage;
+    cv::idft(complexOutput, outputImage, cv::DFT_REAL_OUTPUT + cv::DFT_SCALE);
     
     // Crop to original size
-    return denoised(cv::Rect(0, 0, degradedGray.cols, degradedGray.rows));
+    outputImage = outputImage(cv::Rect(0, 0, degradedGray.cols, degradedGray.rows));
+    
+    // Normalize to 0-255 range
+    cv::normalize(outputImage, outputImage, 0, 255, cv::NORM_MINMAX);
+    outputImage.convertTo(outputImage, CV_8U);
+    
+    // Apply mild noise reduction
+    cv::Mat denoisedImage;
+    cv::fastNlMeansDenoising(outputImage, denoisedImage, 5, 7, 21);
+    
+    // Apply subtle sharpening
+    cv::Mat blurred, sharpened;
+    cv::GaussianBlur(denoisedImage, blurred, cv::Size(0, 0), 1.5);
+    cv::addWeighted(denoisedImage, 1.5, blurred, -0.5, 0, sharpened);
+    
+    return sharpened;
 }
