@@ -313,6 +313,27 @@ cv::Mat wienerFilter(const cv::Mat& degraded, const cv::Mat& psf, double K) {
     int beta = 10;      // Brightness control
     cv::Mat enhanced;
     smoothed.convertTo(enhanced, CV_8U, alpha, beta);
-    
+
+        // Rearrange quadrants to correct orientation
+    int cx = enhanced.cols / 2;
+    int cy = enhanced.rows / 2;
+
+    cv::Mat q0(enhanced, cv::Rect(0, 0, cx, cy));   // Top-Left
+    cv::Mat q1(enhanced, cv::Rect(cx, 0, cx, cy));  // Top-Right
+    cv::Mat q2(enhanced, cv::Rect(0, cy, cx, cy));  // Bottom-Left
+    cv::Mat q3(enhanced, cv::Rect(cx, cy, cx, cy)); // Bottom-Right
+
+    // Swap quadrants (Top-Left with Bottom-Right)
+    cv::Mat tmp;
+    q0.copyTo(tmp);
+    q3.copyTo(q0);
+    tmp.copyTo(q3);
+
+    // Swap quadrants (Top-Right with Bottom-Left)
+    q1.copyTo(tmp);
+    q2.copyTo(q1);
+    tmp.copyTo(q2);
+
+        
     return enhanced;
 }
